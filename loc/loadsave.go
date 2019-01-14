@@ -345,8 +345,16 @@ func (db *VcsDb) LoadOneGraph(graphFile string) (map[string]Commit, error) {
 			!sgetstr(r, &childrenS, "children=") {
 			break
 		}
-		c.parents = strings.Split(parentsS, " ")
-		c.children = strings.Split(childrenS, " ")
+		if parentsS == "" {
+			c.parents = nil
+		} else {
+			c.parents = strings.Split(parentsS, " ")
+		}
+		if childrenS == "" {
+			c.children = nil
+		} else {
+			c.children = strings.Split(childrenS, " ")
+		}
 
 		// Save parsed entry
 		fail = false

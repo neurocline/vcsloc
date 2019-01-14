@@ -105,7 +105,13 @@ func (db *VcsDb) GetRepoInfo() {
 		timestampS := L[tPos+12:anPos-1]
 		authorName := L[anPos+13:aePos-1]
 		authorEmail := L[aePos+14:pPos-1]
-		parentHashes := strings.Split(L[pPos+10:], " ")
+		parentS := strings.TrimSpace(L[pPos+10:])
+		var parentHashes []string
+		if parentS == "" {
+			parentHashes = nil
+		} else {
+			parentHashes = strings.Split(L[pPos+10:], " ")
+		}
 
 		timestamp, err := strconv.Atoi(timestampS)
 		if err != nil {
@@ -151,60 +157,55 @@ func (db *VcsDb) GetRepoInfo() {
 
 	// Now visit all the refs one by one, to compute children (we only have parents
 	// at the moment)
-	linksToFollow := [][]string{}
+	var walkRefs []string
 	for ref, _ := range graphTips {
-		linksToFollow = append(linksToFollow, []string{ref, ""})
+		walkRefs = append(walkRefs, ref)
 	}
 
 	// Repeat until we've followed every commit to the end
 	visited := make(map[string]bool)
 	count := 2
-	for len(linksToFollow) > 0 {
+	for len(walkRefs) > 0 {
 		count += 1
 		fmt.Fprintf(os.Stderr, "\rMake graph (%d)...", count)
 
-		hash, parentHash := linksToFollow[0][0], linksToFollow[0][1]
-		linksToFollow = linksToFollow[1:]
+		hash := walkRefs[0]
+		walkRefs = walkRefs[1:]
 
 		// Follow this commit to the end of the parent chain
 		for hash != "" {
 
-			// Add to children of parent
-			if parentHash != "" {
+			// Add hash as children of each parent of hash, but only once
+			commit := graph[hash]
+			for _, parentHash := range commit.parents {
+				if _, ok := graph[parentHash]; !ok {
+					log.Fatalf("wtf %s not in graph?", parentHash)
+				}
 				parent := graph[parentHash]
 				var hasChild bool
-				for _, c := range parent.children {
-					if c == hash {
+				for _, childHash := range parent.children {
+					if childHash == hash {
 						hasChild = true
 					}
 				}
 				if !hasChild {
 					parent.children = append(parent.children, hash)
+					graph[parentHash] = parent
 				}
-				graph[parentHash] = parent
 			}
 
 			// Now that we've done children, if we've already visited
-			// this node, we don't need to keep going
-			if visited[hash] {
+			// this node, or there are no parents to follow, we can stop
+			if visited[hash] || len(commit.parents) == 0 {
 				break
 			}
 			visited[hash] = true
-			if _, ok := graph[hash]; !ok {
-				log.Fatalf("\nUnexpected commit hash: %s\n", hash)
-			}
 
 			// Now follow parents. If we have more than one parent, push
-			// the other parents onto the queue
-			commit := graph[hash]
-			parentHash = hash
-			if len(commit.parents) == 0 {
-				hash = ""
-			} else {
-				hash = commit.parents[0]
-				for _, v := range commit.parents[1:] {
-					linksToFollow = append(linksToFollow, []string{v, hash})
-				}
+			// the other parents onto the queue and walk them later
+			hash = commit.parents[0]
+			for _, parent := range commit.parents[1:] {
+				walkRefs = append(walkRefs, parent)
 			}
 		}
 	}
