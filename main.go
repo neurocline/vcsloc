@@ -149,13 +149,6 @@ func (cmd *Command) Run() {
 
 		// Follow this commit to the end of the parent chain
 		for hash != "" {
-			if visited[hash] {
-				break
-			}
-			visited[hash] = true
-			if _, ok := graph[hash]; !ok {
-				log.Fatalf("\nUnexpected commit hash: %s\n", hash)
-			}
 			commit := graph[hash]
 
 			// Add to children of parent
@@ -170,6 +163,16 @@ func (cmd *Command) Run() {
 				if !hasChild {
 					parent.children = append(parent.children, hash)
 				}
+			}
+
+			// Now that we've done children, if we've already visited
+			// this node, we don't need to keep going
+			if visited[hash] {
+				break
+			}
+			visited[hash] = true
+			if _, ok := graph[hash]; !ok {
+				log.Fatalf("\nUnexpected commit hash: %s\n", hash)
 			}
 
 			// Now follow parents. If we have more than one parent, push
