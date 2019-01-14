@@ -9,7 +9,9 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -23,12 +25,169 @@ func main() {
 	cmd.parse().Run()
 }
 
+type Commit struct {
+	hash string
+	parents []string
+	children []string
+}
+
 func (cmd *Command) Run() {
-	elapsed, stdout := vcs.GitLog(cmd.Repo)
-	for i, L := range gsos.BytesToLines(stdout) {
-		fmt.Printf("%4d: %s\n", i, string(L))
+	var elapsed float64
+
+	// Check the size of the repo (we may want a progress bar on long repos)
+	var numObjects int
+	fmt.Fprintf(os.Stderr, "Count objects...")
+	numObjects, elapsed = vcs.GitCountObjects(cmd.Repo)
+	if cmd.Verbose {
+		fmt.Printf("%d objects\n", numObjects)
 	}
-	fmt.Printf("Elapsed: %.2f\n", elapsed)
+	fmt.Fprintf(os.Stderr, "elapsed: %.2f\n", elapsed)
+
+	// Get all the refs
+	var refs [][]string
+	fmt.Fprintf(os.Stderr, "Fetch refs...")
+	refs, elapsed = vcs.GitRefs(cmd.Repo)
+	if cmd.Verbose {
+		fmt.Printf("%d refs\n", len(refs))
+		for i, L := range refs {
+			fmt.Printf("%4d: %s = %s\n", i, L[0], L[1])
+		}
+	}
+	fmt.Fprintf(os.Stderr, "elapsed: %.2f\n", elapsed)
+
+	// Get all the root commits
+	// TBD we can get the root commits from the next step, it's just all the commits without parents
+	var roots []string
+	fmt.Fprintf(os.Stderr, "Fetch root commits...")
+	roots, elapsed = vcs.GitRootCommits(cmd.Repo)
+	if cmd.Verbose {
+		fmt.Printf("%d roots\n", len(roots))
+		for i, L := range roots {
+			fmt.Printf("%4d: %s\n", i, L)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "elapsed: %.2f\n", elapsed)
+
+	// Get all the commits and their parents
+	var logs []string
+	fmt.Fprintf(os.Stderr, "Fetch commits...")
+	logs, elapsed = vcs.GitLogAll(cmd.Repo, "|Commit| %H |Parents| %P")
+	if cmd.Verbose {
+		fmt.Printf("%d commits\n", len(logs))
+		for i, L := range logs {
+			pos1 := strings.Index(L, "|Commit| ")
+			pos2 := strings.Index(L, "|Parents| ")
+			if pos1 == -1  || pos2 == -1 {
+				log.Fatalf("Bad log: %s\n", L)
+			}
+			commitHash := L[pos1+9:pos2-1]
+			parentHashes := strings.Split(L[pos2+10:], " ")
+			fmt.Printf("%4d: commit=%s parents=%s\n", i, commitHash, strings.Join(parentHashes, ", "))
+		}
+	}
+	fmt.Fprintf(os.Stderr, "elapsed: %.2f\n", elapsed)
+
+	// Put all the commits in a graph
+	fmt.Fprintf(os.Stderr, "Make graph...")
+	startTime := gsos.HighresTime()
+
+	graph := make(map[string]Commit)
+	for _, L := range logs {
+		pos1 := strings.Index(L, "|Commit| ")
+		pos2 := strings.Index(L, "|Parents| ")
+		if pos1 == -1  || pos2 == -1 {
+			log.Fatalf("Bad log: %s\n", L)
+		}
+		commitHash := L[pos1+9:pos2-1]
+		parentHashes := strings.Split(L[pos2+10:], " ")
+
+		commit := Commit{hash: commitHash, parents: parentHashes}
+		graph[commitHash] = commit
+	}
+
+	fmt.Fprintf(os.Stderr, "\rMake graph (2)...")
+
+	// graphTips is all the refs; every visible commit can be reached from
+	// one of these, and these also are what's "published". We'll use the ref names
+	// to decorate output.
+	var missingRefs int
+	graphTips := make(map[string]string)
+	for _, L := range refs {
+
+		// Evidently not all the refs point to commits in the repo. Not sure
+		// how this is possible.
+		refname := L[0]
+		ref := L[1]
+		if _, ok := graph[ref]; !ok {
+			fmt.Fprintf(os.Stderr, "\r%s missing: %s\nMake graph (2)...", ref, refname)
+			missingRefs += 1
+			continue
+		}
+		graphTips[ref] = refname
+	}
+	if missingRefs > 0 {
+		fmt.Fprintf(os.Stderr, "\r%d refs missing from repo\n", missingRefs)
+		fmt.Fprintf(os.Stderr, "Make graph (2)...")
+	}
+
+	// Now visit all the refs one by one, to compute children (we only have parents
+	// at the moment)
+	linksToFollow := [][]string{}
+	for ref, _ := range graphTips {
+		linksToFollow = append(linksToFollow, []string{ref, ""})
+	}
+
+	// Repeat until we've followed every commit to the end
+	visited := make(map[string]bool)
+	count := 2
+	for len(linksToFollow) > 0 {
+		count += 1
+		fmt.Fprintf(os.Stderr, "\rMake graph (%d)...", count)
+
+		hash, parentHash := linksToFollow[0][0], linksToFollow[0][1]
+		linksToFollow = linksToFollow[1:]
+
+		// Follow this commit to the end of the parent chain
+		for hash != "" {
+			if visited[hash] {
+				break
+			}
+			visited[hash] = true
+			if _, ok := graph[hash]; !ok {
+				log.Fatalf("\nUnexpected commit hash: %s\n", hash)
+			}
+			commit := graph[hash]
+
+			// Add to children of parent
+			if parentHash != "" {
+				parent := graph[parentHash]
+				var hasChild bool
+				for _, c := range parent.children {
+					if c == hash {
+						hasChild = true
+					}
+				}
+				if !hasChild {
+					parent.children = append(parent.children, hash)
+				}
+			}
+
+			// Now follow parents. If we have more than one parent, push
+			// the other parents onto the queue
+			parentHash = hash
+			if len(commit.parents) == 0 {
+				hash = ""
+			} else {
+				hash = commit.parents[0]
+				for _, v := range commit.parents[1:] {
+					linksToFollow = append(linksToFollow, []string{v, hash})
+				}
+			}
+		}
+	}
+	elapsed = (gsos.HighresTime() - startTime).Duration().Seconds() // TBD just return HighresTimestamp
+	fmt.Fprintf(os.Stderr, "elapsed: %.2f\n", elapsed)
+	fmt.Fprintf(os.Stderr, "visited %d out of %d commits\n", len(visited), len(graph))
 }
 
 // ----------------------------------------------------------------------------------------------
