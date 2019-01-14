@@ -10,6 +10,11 @@ import (
 	"vcsloc/gsos"
 )
 
+type Ref struct {
+	Hash string
+	Refname string
+}
+
 // Run a Git command, returning elapsed time and stdout and stderr
 func RunGitCommand(repodir string, env []string, cmd ...string) (float64, []byte, []byte) {
 
@@ -36,12 +41,12 @@ func GitRootCommits(repodir string) ([]string, float64) {
 // GitRefs collects all the refs from the repo, in pairs of
 // ref-name, ref-hash. We use --dereference to make tags show
 // their commits, because that's what we really care about.
-func GitRefs(repodir string) ([][]string, float64) {
+func GitRefs(repodir string) ([]Ref, float64) {
 	elapsed, stdout, _ := RunGitCommand(repodir, nil, "show-ref", "--dereference")
 
 	// Turn output into refnames and hashes, collapsing tag refnames
 	// to their pointed-to commits
-	var refs [][]string
+	var refs []Ref
 	refnames := make(map[string]string)
 	for _, L := range gsos.BytesToLines(stdout) {
 		hash := L[:40]
@@ -53,7 +58,7 @@ func GitRefs(repodir string) ([][]string, float64) {
 	}
 
 	for refname, hash := range refnames {
-		refs = append(refs, []string{refname, hash})
+		refs = append(refs, Ref{hash, refname})
 	}
 
 	return refs, elapsed
