@@ -28,6 +28,11 @@ type Commit struct {
 	children []string
 }
 
+// TBD Vcsdb should probably split into two structs, one for just
+// the database, and one for the working parameters for Analyze.
+
+// Analyze analyzes the selected repo. This uses persisted data from
+// previous runs so that it can be incremental.
 func (db *VcsDb) Analyze(startTime time.Time, verbose bool) {
 	db.verbose = verbose
 	db.startTime = startTime
@@ -37,8 +42,16 @@ func (db *VcsDb) Analyze(startTime time.Time, verbose bool) {
 	db.LoadRefs()
 
 	db.GetRepoInfo()
+
+	db.FetchChangeStats()
+
+	db.FetchDiffs()
 }
 
+// ----------------------------------------------------------------------------------------------
+
+// GetRepoInfo loads key bits of information from the repo.
+// TBD use temps so that we can compare against persisted data.
 func (db *VcsDb) GetRepoInfo() {
 	var elapsed float64
 
@@ -122,13 +135,15 @@ func (db *VcsDb) GetRepoInfo() {
 		graph[commitHash] = commit
 	}
 
-	// Save raw graph
-	rawgraph := make(map[string]Commit)
-	for k, v := range graph {
-		rawgraph[k] = v
+	if SAVE_RAW_GRAPH {
+		// Save raw graph
+		rawgraph := make(map[string]Commit)
+		for k, v := range graph {
+			rawgraph[k] = v
+		}
+		db.rawgraph = rawgraph
+		db.rawgraphDirty = true
 	}
-	db.rawgraph = rawgraph
-	db.rawgraphDirty = true
 
 	fmt.Fprintf(os.Stderr, "\rMake graph (2)...")
 

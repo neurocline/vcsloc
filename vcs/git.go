@@ -30,6 +30,17 @@ func GitLogAll(repodir string, format string) ([]string, float64) {
 	return gsos.BytesToLines(stdout), elapsed
 }
 
+// GitLogNumstat does "git log --numstat --pretty=format:<format> stopHash..startHash"
+func GitLogNumstat(repodir string, startHash, stopHash string, format string) ([]string, float64) {
+	prettyFormat := fmt.Sprintf("--pretty=format:%s", format)
+	commitRange := startHash
+	if stopHash != "" {
+		commitRange = stopHash + ".." + startHash
+	}
+	elapsed, stdout, _ := RunGitCommand(repodir, nil, "log", "--numstat", prettyFormat, commitRange)
+	return gsos.BytesToLines(stdout), elapsed
+}
+
 // GitRootCommits finds the root commits, e.g. commits without parents.
 // Every Git repo has at least one root commit, but it can multiple
 // (the git repo itself has 9)

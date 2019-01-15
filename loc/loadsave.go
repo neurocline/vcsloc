@@ -16,6 +16,8 @@ import (
 	"vcsloc/vcs"
 )
 
+const SAVE_RAW_GRAPH = false
+
 // TBD make types for everything, stop using string
 // TBD maybe tips should be called heads
 
@@ -53,6 +55,11 @@ type VcsDb struct {
 	// graph is the annotated graph (adds children)
 	graph map[string]Commit
 	graphDirty bool
+
+	// nonmergeStat contains the summary of changes for each non-merge commit
+	// (there are multiple entries for merge commits)
+	nonmergeStat map[string]NonmergeStat
+	nonmergeStatdirty bool
 
 	verbose bool
 	startTime time.Time
@@ -98,8 +105,10 @@ func (db *VcsDb) Save() {
 	if db.tipsDirty {
 		db.SaveTips()
 	}
-	if db.rawgraphDirty {
-		db.SaveRawGraph()
+	if SAVE_RAW_GRAPH {
+		if db.rawgraphDirty {
+			db.SaveRawGraph()
+		}
 	}
 	if db.graphDirty {
 		db.SaveGraph()
@@ -335,16 +344,18 @@ func (db *VcsDb) LoadOneGraph(graphFile string) (map[string]Commit, error) {
 		// Parse an graph entry - marker, commit hash, timestamp, date, author, subject
 		fail = true
 		var c Commit
-		var parentsS, childrenS string
+		var parentsS, childrenS, noteS string
 		if !getint(r, &id, "-- ") || id != i ||
 			!sgetstr(r, &c.hash, "hash=") ||
 			!sgetint(r, &c.timestamp, "timestamp=") ||
 			!sgetstr(r, &c.authorName, "name=") ||
 			!sgetstr(r, &c.authorEmail, "email=") ||
+			!sgetstr(r, &noteS, "notes=") ||
 			!sgetstr(r, &parentsS, "parents=") ||
 			!sgetstr(r, &childrenS, "children=") {
 			break
 		}
+		// we don't keep the notes, they are a save-file artifact
 		if parentsS == "" {
 			c.parents = nil
 		} else {
@@ -411,11 +422,19 @@ func (db *VcsDb) SaveOneGraph(graphFile string, graph map[string]Commit) error {
 	//for _, e := range graph {
 	for h.Len() > 0 {
 		e := heap.Pop(h).(Commit)
+		var notes []string
+		if len(e.parents) > 1 {
+			notes = append(notes, "merge")
+		}
+		if len(e.children) > 1 {
+			notes = append(notes, "branch")
+		}
 		w.WriteString(fmt.Sprintf("-- %d\n", i))
 		w.WriteString(fmt.Sprintf("hash=%s\n", e.hash))
 		w.WriteString(fmt.Sprintf("timestamp=%d\n", e.timestamp))
 		w.WriteString(fmt.Sprintf("name=%s\n", e.authorName))
 		w.WriteString(fmt.Sprintf("email=%s\n", e.authorEmail))
+		w.WriteString(fmt.Sprintf("notes=%s\n", strings.Join(notes, ", ")))
 		w.WriteString(fmt.Sprintf("parents=%s\n", strings.Join(e.parents, " ")))
 		w.WriteString(fmt.Sprintf("children=%s\n", strings.Join(e.children, " ")))
 		i++
