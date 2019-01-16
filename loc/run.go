@@ -40,6 +40,7 @@ func (db *VcsDb) Analyze(startTime time.Time, verbose bool) {
 	db.LoadRefs()
 
 	db.GetRepoInfo()
+	db.Save()
 
 	db.FetchChangeStats()
 

@@ -119,6 +119,47 @@ func (db *VcsDb) Save() {
 
 // ----------------------------------------------------------------------------------------------
 
+func (db *VcsDb) doLoadData(name string, callback func(line string)) error {
+	path := filepath.Join(db.dbPath, name)
+
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	fs := bufio.NewScanner(f)
+	for fs.Scan() {
+		callback(fs.Text())
+	}
+	return fs.Err()
+}
+
+func (db *VcsDb) doSaveData(name string, callback func() string) error {
+	path := filepath.Join(db.dbPath, name)
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+
+	line := callback()
+	for line != "" {
+		_, err = w.WriteString(line)
+		if err != nil {
+			return err
+		}
+		line = callback()
+	}
+
+	return nil
+}
+
+// ----------------------------------------------------------------------------------------------
+
 func (db *VcsDb) LoadNumRepoObjects() error {
 	db.numRepoObjectsDirty = true
 	path := filepath.Join(db.dbPath, "repoObjects")
@@ -152,156 +193,90 @@ func (db *VcsDb) SaveNumRepoObjects() error {
 // ----------------------------------------------------------------------------------------------
 
 func (db *VcsDb) LoadRefs() error {
-	db.refsDirty = true
 	db.refs = nil
 
-	path := filepath.Join(db.dbPath, "refs")
-	if db.verbose {
-		fmt.Printf("Loading %s\n", path)
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	fs := bufio.NewScanner(f)
-	for fs.Scan() {
-		line := fs.Text()
+	fn := func(line string) {
 		hash := line[:40]
 		refname := line[41:]
 		db.refs = append(db.refs, vcs.Ref{hash, refname})
 	}
+	err := db.doLoadData("refs", fn)
+
 	db.refsDirty = false
-	return fs.Err()
+	return err
 }
 
 func (db *VcsDb) SaveRefs() error {
-	path := filepath.Join(db.dbPath, "refs")
-	if db.verbose {
-		fmt.Printf("Saving %d refs to %s\n", len(db.refs), path)
-	}
-
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
-	defer w.Flush()
-
-	for _, ref := range db.refs {
-		_, err = w.WriteString(fmt.Sprintf("%s %s\n", ref.Hash, ref.Refname))
-		if err != nil {
-			return err
+	i := -1
+	fn := func() string {
+		i++
+		if i == len(db.refs) {
+			return ""
 		}
+		return fmt.Sprintf("%s %s\n", db.refs[i].Hash, db.refs[i].Refname)
 	}
+	err := db.doSaveData("refs", fn)
 
 	db.refsDirty = false
-	return nil
+	return err
 }
 
 // ----------------------------------------------------------------------------------------------
 
 func (db *VcsDb) LoadRoots() error {
-	db.rootsDirty = true
 	db.roots = nil
 
-	path := filepath.Join(db.dbPath, "roots")
-	if db.verbose {
-		fmt.Printf("Loading %s\n", path)
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	fs := bufio.NewScanner(f)
-	for fs.Scan() {
-		line := fs.Text()
+	fn := func(line string) {
 		db.roots = append(db.roots, line)
 	}
+	err := db.doLoadData("roots", fn)
+
 	db.rootsDirty = false
-	return fs.Err()
+	return err
 }
 
 func (db *VcsDb) SaveRoots() error {
-	path := filepath.Join(db.dbPath, "roots")
-	if db.verbose {
-		fmt.Printf("Saving %d roots to %s\n", len(db.roots), path)
-	}
-
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
-	defer w.Flush()
-
-	for _, root := range db.roots {
-		_, err = w.WriteString(fmt.Sprintf("%s\n", root))
-		if err != nil {
-			return err
+	i := -1
+	fn := func() string {
+		i++
+		if i == len(db.roots) {
+			return ""
 		}
+		return fmt.Sprintf("%s\n", db.roots[i])
 	}
+	err := db.doSaveData("roots", fn)
 
 	db.rootsDirty = false
-	return nil
+	return err
 }
 
 // ----------------------------------------------------------------------------------------------
 
 func (db *VcsDb) LoadTips() error {
-	db.tipsDirty = true
 	db.tips = nil
 
-	path := filepath.Join(db.dbPath, "tips")
-	if db.verbose {
-		fmt.Printf("Loading %s\n", path)
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	fs := bufio.NewScanner(f)
-	for fs.Scan() {
-		line := fs.Text()
+	fn := func(line string) {
 		db.tips = append(db.tips, line)
 	}
+	err := db.doLoadData("tips", fn)
+
 	db.tipsDirty = false
-	return fs.Err()
+	return err
 }
 
 func (db *VcsDb) SaveTips() error {
-	path := filepath.Join(db.dbPath, "tips")
-	if db.verbose {
-		fmt.Printf("Saving %d tips to %s\n", len(db.tips), path)
-	}
-
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
-	defer w.Flush()
-
-	for _, tip := range db.tips {
-		_, err = w.WriteString(fmt.Sprintf("%s\n", tip))
-		if err != nil {
-			return err
+	i := -1
+	fn := func() string {
+		i++
+		if i == len(db.tips) {
+			return ""
 		}
+		return fmt.Sprintf("%s\n", db.tips[i])
 	}
+	err := db.doSaveData("tips", fn)
 
 	db.tipsDirty = false
-	return nil
+	return err
 }
 
 // ----------------------------------------------------------------------------------------------

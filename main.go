@@ -121,6 +121,8 @@ func (cmd *Command) ParseStrArg(arg string, opt string, val *string, tag string)
 }
 
 // Usage shows short command-line usage and then exits.
+// TBD put this into some sort of order, either alphabetical
+// or by declaration in code
 func (cmd *Command) Usage(fail int) {
 	usage := "usage: vcsloc"
 	for k, v := range cmd.usage {
