@@ -3,9 +3,6 @@
 package loc
 
 import (
-	"fmt"
-	"log"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +33,7 @@ type Commit struct {
 func (db *VcsDb) Analyze(startTime time.Time, verbose bool) {
 	db.verbose = verbose
 	db.startTime = startTime
+	db.terminal = gsos.NewThrottleTerminal(100*time.Millisecond)
 
 	// Compare the saved data to the current repo. If anything meaningful
 	// changed (number of objects, refs), then we need to scan the repo for new commits.
@@ -57,51 +55,39 @@ func (db *VcsDb) GetRepoInfo() {
 
 	// Check the size of the repo (we may want a progress bar on long repos)
 	var numObjects int
-	fmt.Fprintf(os.Stderr, "Count objects...")
+	db.terminal.Force().Progressf("Count objects...")
 	numObjects, elapsed = vcs.GitCountObjects(db.repoPath)
-	if db.verbose {
-		fmt.Printf("%d objects\n", numObjects)
-	}
 	if db.numRepoObjects != numObjects {
 		db.numRepoObjects = numObjects
 		db.numRepoObjectsDirty = true
 	}
-	fmt.Fprintf(os.Stderr, "elapsed: %.2f\n", elapsed)
+	db.terminal.Printf("Found %d objects in %.2f sec", numObjects, elapsed)
 
 	// Get all the refs
 	var refs []vcs.Ref
-	fmt.Fprintf(os.Stderr, "Fetch refs...")
+	db.terminal.Force().Progressf("Fetch refs...")
 	refs, elapsed = vcs.GitRefs(db.repoPath)
-	if db.verbose {
-		fmt.Printf("%d refs\n", len(refs))
-	}
 	db.refs = refs
 	db.refsDirty = true
-	fmt.Fprintf(os.Stderr, "elapsed: %.2f\n", elapsed)
+	db.terminal.Printf("Found %d refs in %.2f sec", len(refs), elapsed)
 
 	// Get all the root commits
 	// TBD we can get the root commits from the next step, it's just all the commits without parents
 	var roots []string
-	fmt.Fprintf(os.Stderr, "Fetch root commits...")
+	db.terminal.Force().Progressf("Fetch root commits...")
 	roots, elapsed = vcs.GitRootCommits(db.repoPath)
-	if db.verbose {
-		fmt.Printf("%d roots\n", len(roots))
-	}
 	db.roots = roots
 	db.rootsDirty = true
-	fmt.Fprintf(os.Stderr, "elapsed: %.2f\n", elapsed)
+	db.terminal.Printf("Found %d roots in %.2f sec", len(roots), elapsed)
 
 	// Get all the commits and their parents
 	var logs []string
-	fmt.Fprintf(os.Stderr, "Fetch commits...")
+	db.terminal.Force().Progressf("Fetch commits...")
 	logs, elapsed = vcs.GitLogAll(db.repoPath, "|Commit| %H |Timestamp| %at |AuthorName| %aN |AuthorEmail| %aE |Parents| %P")
-	if db.verbose {
-		fmt.Printf("%d commits\n", len(logs))
-	}
-	fmt.Fprintf(os.Stderr, "elapsed: %.2f\n", elapsed)
+	db.terminal.Printf("Got %d commits in %.2f sec", len(logs), elapsed)
 
 	// Put all the commits in a graph
-	fmt.Fprintf(os.Stderr, "Make graph...")
+	db.terminal.Force().Progressf("Make graph...")
 	startTime := gsos.HighresTime()
 
 	graph := make(map[string]Commit)
@@ -112,7 +98,7 @@ func (db *VcsDb) GetRepoInfo() {
 		aePos := strings.Index(L, "|AuthorEmail| ")
 		pPos := strings.Index(L, "|Parents| ")
 		if cPos == -1  || tPos == -1 || anPos == -1 || aePos == -1 || pPos == -1 {
-			log.Fatalf("Bad log: %s\n", L)
+			db.terminal.Fatalf("Bad log: %s\n", L)
 		}
 		commitHash := L[cPos+9:tPos-1]
 		timestampS := L[tPos+12:anPos-1]
@@ -128,7 +114,7 @@ func (db *VcsDb) GetRepoInfo() {
 
 		timestamp, err := strconv.Atoi(timestampS)
 		if err != nil {
-			log.Fatalf("Bad log (timestamp): %s\n", L)
+			db.terminal.Fatalf("Bad log (timestamp): %s\n", L)
 		}
 
 		commit := Commit{hash: commitHash, timestamp: timestamp, authorName: authorName, authorEmail: authorEmail, parents: parentHashes}
@@ -145,12 +131,12 @@ func (db *VcsDb) GetRepoInfo() {
 		db.rawgraphDirty = true
 	}
 
-	fmt.Fprintf(os.Stderr, "\rMake graph (2)...")
+	db.terminal.Force().Progressf("Make graph (2)...")
 
 	// graphTips is all the refs; every visible commit can be reached from
 	// one of these, and these also are what's "published". We'll use the ref names
 	// to decorate output.
-	var missingRefs int
+	var missingRefs []string
 	graphTips := make(map[string]string)
 	for _, ref := range refs {
 
@@ -159,15 +145,19 @@ func (db *VcsDb) GetRepoInfo() {
 		refname := ref.Refname
 		ref := ref.Hash
 		if _, ok := graph[ref]; !ok {
-			fmt.Fprintf(os.Stderr, "\r%s missing: %s\nMake graph (2)...", ref, refname)
-			missingRefs += 1
+			db.terminal.Printf("%s missing: %s", ref, refname)
+			db.terminal.Force().Progressf("Make graph (2)...")
+			missingRefs = append(missingRefs, ref)
 			continue
 		}
 		graphTips[ref] = refname
 	}
-	if missingRefs > 0 {
-		fmt.Fprintf(os.Stderr, "\r%d refs missing from repo\n", missingRefs)
-		fmt.Fprintf(os.Stderr, "Make graph (2)...")
+	if len(missingRefs) > 0 {
+		db.terminal.Printf("%d refs missing from repo\n", len(missingRefs))
+		for _, ref := range missingRefs {
+			db.terminal.Printf("    %s\n", ref)
+		}
+		db.terminal.Force().Progressf("Make graph (2)...")
 	}
 
 	// Now visit all the refs one by one, to compute children (we only have parents
@@ -182,7 +172,7 @@ func (db *VcsDb) GetRepoInfo() {
 	count := 2
 	for len(walkRefs) > 0 {
 		count += 1
-		fmt.Fprintf(os.Stderr, "\rMake graph (%d)...", count)
+		db.terminal.Progressf("Make graph (%d)...", count)
 
 		hash := walkRefs[0]
 		walkRefs = walkRefs[1:]
@@ -194,7 +184,7 @@ func (db *VcsDb) GetRepoInfo() {
 			commit := graph[hash]
 			for _, parentHash := range commit.parents {
 				if _, ok := graph[parentHash]; !ok {
-					log.Fatalf("wtf %s not in graph?", parentHash)
+					db.terminal.Fatalf("wtf %s not in graph?", parentHash)
 				}
 				parent := graph[parentHash]
 				var hasChild bool
@@ -209,12 +199,18 @@ func (db *VcsDb) GetRepoInfo() {
 				}
 			}
 
-			// Now that we've done children, if we've already visited
-			// this node, or there are no parents to follow, we can stop
-			if visited[hash] || len(commit.parents) == 0 {
+			// Now that we've done children, if we already visited this
+			// node, we're done
+			if visited[hash] {
 				break
 			}
+
 			visited[hash] = true
+
+			// If there are no parents to follow, we can stop
+			if len(commit.parents) == 0 {
+				break
+			}
 
 			// Now follow parents. If we have more than one parent, push
 			// the other parents onto the queue and walk them later
@@ -243,6 +239,14 @@ func (db *VcsDb) GetRepoInfo() {
 	db.tipsDirty = true
 
 	elapsed = (gsos.HighresTime() - startTime).Duration().Seconds() // TBD just return HighresTimestamp
-	fmt.Fprintf(os.Stderr, "elapsed: %.2f\n", elapsed)
-	fmt.Fprintf(os.Stderr, "visited %d out of %d commits\n", len(visited), len(graph))
+	db.terminal.Printf("Make graph: %.2f\n", elapsed)
+	db.terminal.Printf("visited %d out of %d commits\n", len(visited), len(graph))
+
+	if len(visited) != len(graph) {
+		for hash, _ := range graph {
+			if _, ok := visited[hash]; !ok {
+				db.terminal.Printf("Didn't visit %s\n", hash)
+			}
+		}
+	}
 }

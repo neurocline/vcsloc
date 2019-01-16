@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"vcsloc/gsos"
 	"vcsloc/vcs"
 )
 
@@ -63,6 +64,7 @@ type VcsDb struct {
 
 	verbose bool
 	startTime time.Time
+	terminal gsos.Terminal
 }
 
 // ----------------------------------------------------------------------------------------------

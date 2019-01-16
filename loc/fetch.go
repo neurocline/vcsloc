@@ -4,8 +4,6 @@ package loc
 
 import (
 	"fmt"
-	"log"
-	"os"
 	"strconv"
 	"strings"
 
@@ -44,27 +42,33 @@ func (db *VcsDb) FetchChangeStats() {
 
 	count := 0
 	for len(walkRefs) > 0 {
-		hash := walkRefs[0][0]
+		root := walkRefs[0][0]
 		parent := walkRefs[0][1]
 		walkRefs = walkRefs[1:]
-		fmt.Fprintf(os.Stderr, "\rNext in commit chain: %s           \n", hash)
 
-		for hash != "" {
+		hash := root
+		for {
+			// If we have seen this hash, then we must have already traversed
+			// it and all its children.
+			if _, ok := seen[hash]; ok {
+				break
+			}
+
+			// Get info on commit
 			commit := db.graph[hash]
 
-			// Get info if we haven't seen this hash
-			if _, ok := seen[hash]; !ok {
-				fmt.Fprintf(os.Stderr, "\r%d: git log...%s", count, hash)
-				count += 1
-				if len(commit.parents) <= 1 {
-					sh := db.GetNonmergeStat(hash, parent)
-					stats[hash] = sh
-				}
+			count += 1
+			db.terminal.Progressf("%d (%d) follow %s: git log %s", count, len(walkRefs), root[:10], hash[:10])
+
+			if len(commit.parents) <= 1 {
+				sh := db.GetNonmergeStat(hash, parent)
+				stats[hash] = sh
 			}
 			seen[hash] = true
 
 			// Go to the next child. If there are multiple children, pick the leftmost
-			// one and queue the rest
+			// one and queue the rest. Don't queue children that have already been
+			// visited
 			if len(commit.children) == 0 {
 				break
 			}
@@ -72,6 +76,9 @@ func (db *VcsDb) FetchChangeStats() {
 			parent = hash
 			hash = commit.children[0]
 			for _, h := range commit.children[1:] {
+				if _, ok := seen[h]; ok {
+					continue
+				}
 				walkRefs = append(walkRefs, []string{h, parent})
 			}
 		}
@@ -89,7 +96,8 @@ func (db *VcsDb) GetNonmergeStat(hash, parent string) NonmergeStat {
 
 	_, stdout, _ := vcs.RunGitCommand(db.repoPath, nil, cmd...)
 	text := gsos.BytesToLines(stdout)
-	fmt.Printf("\ngit %s", strings.Join(cmd, " "))
+	// TBD only do this output if we are redirecting stdout to a file?
+	fmt.Printf("git %s\n", strings.Join(cmd, " "))
 	fmt.Printf("%s\n", strings.Join(text, "\n"))
 
 	changes := make(map[string]Change)
@@ -125,8 +133,8 @@ func (db *VcsDb) GetNonmergeStat(hash, parent string) NonmergeStat {
 			verb := L[0:7]
 			access := L[13:20]
 			filepath := L[20:]
-			if !(access == "100644 " || access == "100755 " || access == "120000 ") {
-				log.Fatalf("%s don't understand access '%s' line: '%s'", commitRange, access, L)
+			if !(access == "100644 " || access == "100755 " || access == "120000 " || access == "160000 ") {
+				db.terminal.Fatalf("%s don't understand access '%s' line: '%s'", commitRange, access, L)
 			}
 			change := changes[filepath]
 			if verb == " create" {
@@ -141,7 +149,7 @@ func (db *VcsDb) GetNonmergeStat(hash, parent string) NonmergeStat {
 			pos2 := strings.Index(L, " => ")
 			pos3 := strings.LastIndex(L, "(")
 			if pos2 == -1 || pos3 == -1 {
-				log.Fatalf("%s don't understand rename: '%s'", commitRange, L)
+				db.terminal.Fatalf("%s don't understand rename: '%s'", commitRange, L)
 			}
 			oldPath := L[pos1:pos2]
 			newPath := L[pos2+4:pos3-1]
@@ -154,7 +162,7 @@ func (db *VcsDb) GetNonmergeStat(hash, parent string) NonmergeStat {
 			// We don't care
 			fmt.Printf("Ignoring %s\n", L)
 		} else {
-			log.Fatalf("%s don't understand: '%s'", commitRange, L)
+			db.terminal.Fatalf("%s don't understand: '%s'", commitRange, L)
 		}
 	}
 
