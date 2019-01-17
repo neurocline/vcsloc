@@ -10,6 +10,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -48,13 +49,14 @@ type Command struct {
 
 	i int
 	args []string
-	usage map[string]string
-	targets map[uintptr]string
+
+	u *CommandUsage
 }
 
+// Command parses a command-line into parsed values. If input can't be parsed,
+// a relevant error is shown.
 func (cmd *Command) parse() *Command {
-	cmd.usage = make(map[string]string)
-	cmd.targets = make(map[uintptr]string)
+	cmd.u = NewCommandUsage()
 
 	// Iterate through arglist by hand, because some argument parsing can consume
 	// multiple arguments
@@ -89,7 +91,7 @@ func (cmd *Command) parse() *Command {
 // ParseBoolArg auto-creates usage and checks the current arg against a
 // specific boolean option.
 func (cmd *Command) ParseBoolArg(arg string, opt string, val *bool) bool {
-	cmd.MakeBoolUsage(opt, uintptr(unsafe.Pointer(val)))
+	cmd.u.MakeUsage(opt, "bool", uintptr(unsafe.Pointer(val)))
 
 	if arg != opt {
 		return false
@@ -99,8 +101,10 @@ func (cmd *Command) ParseBoolArg(arg string, opt string, val *bool) bool {
 	return true
 }
 
+// ParseStrArg auto-creates usage and checks the current arg against a
+// specific string option. Both "--opt=val" and "--opt val" forms are allowed.
 func (cmd *Command) ParseStrArg(arg string, opt string, val *string, tag string) bool {
-	cmd.MakeStrUsage(opt, tag)
+	cmd.u.MakeUsage(opt, tag, uintptr(unsafe.Pointer(val)))
 
 	// If this is of the form --opt=val, then get the value from arg
 	optlen := len(opt)
@@ -120,53 +124,76 @@ func (cmd *Command) ParseStrArg(arg string, opt string, val *string, tag string)
 	return false
 }
 
-// Usage shows short command-line usage and then exits.
-// TBD put this into some sort of order, either alphabetical
-// or by declaration in code
+// Usage shows command-line usage gleaned from the command-line declarations.
 func (cmd *Command) Usage(fail int) {
-	usage := "usage: vcsloc"
-	for k, v := range cmd.usage {
-		var kv string
-		if v == "bool" {
-			kv = fmt.Sprintf("[%s]", k)
-		} else {
-			kv = fmt.Sprintf("[%s=<%s>]", k, v)
-		}
-		if len(usage) + 1 + len(kv) >= 75 {
-			fmt.Fprintf(os.Stderr, "%s\n", usage)
-			usage = "             "
-		}
-		usage = usage + " " + kv
-	}
-
-	fmt.Fprintf(os.Stderr, "%s\n", usage)
+	fmt.Fprintf(os.Stderr, "%s\n", cmd.u.Usage("usage: vcsloc"))
 	os.Exit(fail)
 }
 
-// MakeBoolUsage synthesizes usage entry for a boolean command-line option.
-// Aliases of the same logical option are gathered together.
-func (cmd *Command) MakeBoolUsage(opt string, pval uintptr) {
+// ----------------------------------------------------------------------------------------------
 
-	// Do we already have an option sharing the value
-	if optAlias, ok := cmd.targets[pval]; ok {
-		// Yes, so create a new synthetic option with the new alias
-		// replacing the old one
-		delete(cmd.usage, optAlias)
-		optAlias = optAlias + " | " + opt
-		cmd.usage[optAlias] = "bool"
-		cmd.targets[pval] = optAlias
-
-	} else if _, ok := cmd.usage[opt]; !ok {
-		// Otherwise, add it if it doesn't already exist
-		cmd.usage[opt] = "bool"
-		cmd.targets[pval] = opt
-	}
+type CommandUsage struct {
+	usage []CommandOptionUsage
+	targets map[uintptr]int
+	seen map[string]bool
 }
 
-// MakeStrUsage synthesizes usage entry for a string command-line option.
-// We assume string args have no alias
-func (cmd *Command) MakeStrUsage(opt string, tag string) {
-	if _, ok := cmd.usage[opt]; !ok {
-		cmd.usage[opt] = tag
+type CommandOptionUsage struct {
+	opt []string
+	tag string
+}
+
+func NewCommandUsage() *CommandUsage {
+	u := &CommandUsage{}
+	u.seen = make(map[string]bool)
+	u.targets = make(map[uintptr]int)
+	return u
+}
+
+// MakeUsage synthesizes usage entry for a command-line option.
+// Aliases of the same logical option are gathered together.
+// For bool options, pass tag="bool"
+func (u *CommandUsage) MakeUsage(opt string, tag string, pval uintptr) {
+	// If we've already seen the opt, then we already did the work
+	if _, ok := u.seen[opt]; ok {
+		return
 	}
+
+	// If we haven't seen the target, add a new usage record
+	if _, ok := u.targets[pval]; !ok {
+		u.targets[pval] = len(u.usage)
+		u.usage = append(u.usage, CommandOptionUsage{})
+	}
+
+	// Add this specific option's information to usage
+	u.seen[opt] = true
+	n := u.targets[pval]
+	u.usage[n].opt = append(u.usage[n].opt, opt)
+	u.usage[n].tag = tag
+}
+
+// Usage shows short command-line usage and then exits.
+// It groups aliases together, and shows output in the order
+// that the command-line was defined by the programmer.
+func (u *CommandUsage) Usage(usagePrompt string) string {
+	usageLen := len(usagePrompt)
+	var output string
+	line := usagePrompt
+	for _, v := range u.usage {
+		var opt string = strings.Join(v.opt, " | ")
+		var kv string
+		if v.tag == "bool" {
+			kv = fmt.Sprintf("[%s]", opt)
+		} else {
+			kv = fmt.Sprintf("[%s=<%s>]", opt, v.tag)
+		}
+		if len(line) + 1 + len(kv) >= 75 {
+			output = output + line + "\n"
+			line = strings.Repeat(" ", usageLen)
+		}
+		line = line + " " + kv
+	}
+
+	output = output + line
+	return output
 }
