@@ -24,8 +24,9 @@ func main() {
 }
 
 func (cmd *Command) Run() {
-	db := loc.Load(cmd.Db, cmd.Repo, cmd.Vcs)
-	db.Analyze(cmd.StartTime, cmd.Verbose)
+	db := loc.OpenDb(cmd.Db, cmd.Repo, cmd.Vcs)
+	analyzer := loc.NewAnalyzer(cmd.StartTime, cmd.Verbose, db)
+	analyzer.Run()
 	db.Save()
 }
 

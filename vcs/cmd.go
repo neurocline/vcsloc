@@ -3,6 +3,7 @@
 package vcs
 
 import (
+	"bufio"
 	"bytes"
 	"log"
 	"os"
@@ -41,6 +42,61 @@ func RunExternal(exe string, workingDir string, env []string, params ...string) 
 	}
 
 	return cmdTime, stdout.Bytes(), stderr.Bytes()
+}
+
+// RunExternalIncremental runs an external command incrementally, returning elapsed time.
+// The stdout and stderr are provided through a callback as individual lines. The stdout
+// callback is mandatory, but the stderr callback is optional.
+// TBD add stdin that gets fed to the external program
+func RunExternalIncremental(outCb, errCb func(string),
+	exe string, workingDir string, env []string, params ...string) float64 {
+
+	// Do one-time find of the executable
+	exePath := lookupPath(exe)
+
+	// Prepare the command
+	c := exec.Command(exePath, params...)
+	c.Dir = workingDir
+	c.Env = append(os.Environ(), env...)
+
+	stdoutPipe, _ := c.StdoutPipe()
+	stdout := bufio.NewScanner(stdoutPipe)
+
+	stderrPipe, _ := c.StderrPipe()
+	stderr := bufio.NewScanner(stderrPipe)
+
+	done := make(chan struct{})
+
+	// Start the command. We can fetch stdout in the current thread, and
+	// defer stderr to a goroutine. This should be performant.
+	startTime := gsos.HighresTime()
+	c.Start()
+
+	for stdout.Scan() {
+		outCb(stdout.Text())
+	}
+
+	go func() {
+		for stderr.Scan() {
+			line := stderr.Text()
+			if errCb != nil {
+				errCb(line)
+			}
+		}
+		done <- struct{}{} // prevent race, although this could slow us down on really quick externals
+	}()
+
+	// Now wait for all the output. Hopefully our stderr will be consumed before
+	// we exit.
+	<-done
+	err := c.Wait()
+	cmdTime := (gsos.HighresTime() - startTime).Duration().Seconds() // TBD just return HighresTimestamp
+
+	if err != nil {
+		log.Fatalf("\n%s %s failed: %s\n", exe, strings.Join(params, " "), err)
+	}
+
+	return cmdTime
 }
 
 // lookupPath memoizes executable paths for better performance - some

@@ -3,6 +3,7 @@
 package loc
 
 import (
+//	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -11,22 +12,143 @@ import (
 	"vcsloc/vcs"
 )
 
-// ----------------------------------------------------------------------------------------------
-
-type Commit struct {
-	// read from repo
-	hash string
-	timestamp int
-	authorName string
-	authorEmail string
-	parents []string
-
-	// computed
-	children []string
+func NewAnalyzer(startTime time.Time, verbose bool, db *VcsDb2, ) *Analyzer {
+	return &Analyzer{
+		startTime: startTime,
+		verbose:
+		verbose,
+		db: db,
+		terminal: gsos.NewThrottleTerminal(100*time.Millisecond),
+	}
 }
 
-// TBD Vcsdb should probably split into two structs, one for just
-// the database, and one for the working parameters for Analyze.
+type Analyzer struct {
+	db *VcsDb2
+
+	verbose bool
+	startTime time.Time
+	terminal gsos.Terminal
+}
+
+func (work *Analyzer) Run() {
+	// Make sure our database is up-to-date with the target repo
+	// (this can take a while the first time)
+	work.UpdateRepo()
+
+	// Courtesy terminate any progress message
+	work.terminal.Printf("")
+}
+
+// ----------------------------------------------------------------------------------------------
+
+func (work *Analyzer) UpdateRepo() {
+
+	work.terminal.Force().Progressf("Checking repo...")
+
+	// Check the size of the repo (we may want a progress bar on long repos)
+	work.db.info.Load(work.db)
+
+	numObjects, _ := vcs.GitCountObjects(work.db.hdr.repoPath)
+
+	// Get all the refs from the repo and compare against our local refs
+	work.db.refs.Load(work.db)
+
+	var refs []vcs.Ref
+	refs, _ = vcs.GitRefs(work.db.hdr.repoPath)
+	var sameRefs bool
+
+	if len(refs) == len(work.db.refs.refs) {
+		sameRefs = true
+		for i := 0; i < len(refs); i++ {
+			if refs[i].RefHash != work.db.refs.refs[i].RefHash {
+				sameRefs = false
+			}
+			if refs[i].Refname != work.db.refs.refs[i].Refname {
+				sameRefs = false
+			}
+		}
+	}
+
+	// If we have the same objects and the same refs, we have all
+	// the data (this is probably too strong, either is likely sufficient)
+	if work.db.info.graphUpToDate && work.db.info.numRepoObjects == numObjects && sameRefs {
+		work.terminal.Printf("Database up to date")
+		return
+	}
+
+	// Something didn't match, update our data
+	work.terminal.Printf("Got %d/%d objects, %d/%d refs\n",
+		work.db.info.numRepoObjects, numObjects, len(work.db.refs.refs), len(refs))
+
+	work.terminal.Printf("Updating repo...\n")
+
+	// We already got the refs and number of objects, so save those first
+	work.db.info.numRepoObjects = numObjects
+	work.db.info.dirty = true
+
+	work.db.refs.refs = refs
+	work.db.refs.dirty = true
+
+	// Now update our commits list. We just get the whole thing, it's faster
+	// than trying to do it incrementally.
+	work.db.commits.hashes = work.FetchAllCommitHashes()
+	work.db.commits.dirty = true
+	work.db.info.numRepoCommits = len(work.db.commits.commits)
+	work.db.info.graphUpToDate = false // we might have changed commits, re-scan
+
+	// Do incremental save - we'll update the other parts next
+	work.db.info.Save(work.db)
+	work.db.refs.Save(work.db)
+	work.db.commits.Save(work.db)
+
+	// Now see if we need to fetch more raw commits
+	work.FetchMissingCommits()
+
+	// Do incremental save
+	work.db.info.Save(work.db)
+	work.db.refs.Save(work.db)
+	work.db.commits.Save(work.db)
+}
+
+// FetchAllCommitHashes fetches just the commit hashes. This should run at
+// about 50K hashes/second
+func (work *Analyzer) FetchAllCommitHashes() []vcs.Hash {
+	var hashes []vcs.Hash
+	outCb := func(line string) {
+		hashes = append(hashes, vcs.Hash(line))
+		if work.terminal.Ready() {
+			work.terminal.Progressf("Getting commit hashes (%d)...", len(hashes))
+		}
+	}
+
+	cmd := []string{"log", "--all", "--pretty=%H"}
+	vcs.RunGitCommandIncremental(outCb, nil, work.db.hdr.repoPath, nil, cmd...)
+	work.terminal.Printf("Got %d commit hashes", len(hashes))
+
+	return hashes
+}
+
+// FetchMissingCommits fetches commits that we haven't received yet. This should
+// run at about 2000 commits/second
+func (work *Analyzer) FetchMissingCommits() {
+	var commits []Commit
+	outCb := func(line string) {
+		if strings.HasPrefix(line, "|Commit|") {
+			commits = append(commits, Commit{})
+		}
+		//fmt.Printf("%s\n", line)
+		if work.terminal.Ready() {
+			work.terminal.Progressf("Getting commits (%d)...", len(commits))
+		}
+	}
+
+	prettyFormat := "--pretty=format:|Commit| %H |Timestamp| %at |AuthorName| %aN |AuthorEmail| %aE |Parents| %P"
+	cmd := []string{"log", "--numstat", "--summary", prettyFormat, "--all"}
+	vcs.RunGitCommandIncremental(outCb, nil, work.db.hdr.repoPath, nil, cmd...)
+	work.terminal.Printf("Got %d commits", len(commits))
+}
+
+// ----------------------------------------------------------------------------------------------
 
 // Analyze analyzes the selected repo. This uses persisted data from
 // previous runs so that it can be incremental.
@@ -144,7 +266,7 @@ func (db *VcsDb) GetRepoInfo() {
 		// Evidently not all the refs point to commits in the repo. Not sure
 		// how this is possible.
 		refname := ref.Refname
-		ref := ref.Hash
+		ref := string(ref.RefHash)
 		if _, ok := graph[ref]; !ok {
 			db.terminal.Printf("%s missing: %s", ref, refname)
 			db.terminal.Force().Progressf("Make graph (2)...")

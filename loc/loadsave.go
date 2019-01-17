@@ -17,6 +17,8 @@ import (
 	"vcsloc/vcs"
 )
 
+// This code is obsolete and will be removed soon.
+
 const SAVE_RAW_GRAPH = false
 
 // TBD make types for everything, stop using string
@@ -198,7 +200,7 @@ func (db *VcsDb) LoadRefs() error {
 	fn := func(line string) {
 		hash := line[:40]
 		refname := line[41:]
-		db.refs = append(db.refs, vcs.Ref{hash, refname})
+		db.refs = append(db.refs, vcs.Ref{vcs.Hash(hash), refname})
 	}
 	err := db.doLoadData("refs", fn)
 
@@ -213,7 +215,7 @@ func (db *VcsDb) SaveRefs() error {
 		if i == len(db.refs) {
 			return ""
 		}
-		return fmt.Sprintf("%s %s\n", db.refs[i].Hash, db.refs[i].Refname)
+		return fmt.Sprintf("%s %s\n", db.refs[i].RefHash, db.refs[i].Refname)
 	}
 	err := db.doSaveData("refs", fn)
 
@@ -479,41 +481,4 @@ func getint(r *bufio.Scanner, i *int, prefix string) bool {
 		return false
 	}
 	return true
-}
-
-// ----------------------------------------------------------------------------------------------
-
-func FileWriteLines(path string, lines []string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
-	defer w.Flush()
-
-	for _, L := range lines {
-		_, err = w.WriteString(fmt.Sprintf("%s\n", L))
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// FileReadLines returns data from a file as individual lines of text
-func FileReadLines(path string) (lines []string, err error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	fs := bufio.NewScanner(f)
-	for fs.Scan() {
-		lines = append(lines, fs.Text())
-	}
-	err = fs.Err()
-	return
 }

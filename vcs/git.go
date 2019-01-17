@@ -10,15 +10,25 @@ import (
 	"vcsloc/gsos"
 )
 
+type Hash string
+
 type Ref struct {
-	Hash string
+	RefHash Hash
 	Refname string
 }
+
+// ----------------------------------------------------------------------------------------------
 
 // Run a Git command, returning elapsed time and stdout and stderr
 func RunGitCommand(repodir string, env []string, cmd ...string) (float64, []byte, []byte) {
 
 	return RunExternal("git", repodir, env, cmd...)
+}
+
+// Run a Git command incrementally
+func RunGitCommandIncremental(outCb, errCb func(string), repodir string, env []string, cmd ...string) float64 {
+
+	return RunExternalIncremental(outCb, errCb, "git", repodir, env, cmd...)
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -58,19 +68,23 @@ func GitRefs(repodir string) ([]Ref, float64) {
 	// Turn output into refnames and hashes, collapsing tag refnames
 	// to their pointed-to commits
 	var refs []Ref
-	refnames := make(map[string]string)
+	refnames := make(map[string]int)
 	for _, L := range gsos.BytesToLines(stdout) {
 		hash := L[:40]
 		refname := L[41:]
 		if strings.HasSuffix(refname, "^{}") {
 			refname = refname[:len(refname)-3]
+			refs[refnames[refname]].RefHash = Hash(hash) // replace tag hash with commit hash
+		} else {
+			refnames[refname] = len(refs)
+			refs = append(refs, Ref{Hash(hash), refname})
 		}
-		refnames[refname] = hash
+		//refnames[refname] = hash
 	}
 
-	for refname, hash := range refnames {
-		refs = append(refs, Ref{hash, refname})
-	}
+	//for refname, hash := range refnames {
+	//	refs = append(refs, Ref{Hash(hash), refname})
+	//}
 
 	return refs, elapsed
 }

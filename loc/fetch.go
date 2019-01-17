@@ -11,24 +11,6 @@ import (
 	"vcsloc/vcs"
 )
 
-// NonmergeStat is the list of changes for a non-merge commit
-type NonmergeStat struct {
-	parent string
-	changes []Change
-}
-
-type Change struct {
-	path string
-	add int
-	remove int
-	binary bool
-
-	create bool
-	delete bool
-	rename bool
-	oldPath string
-}
-
 // ----------------------------------------------------------------------------------------------
 
 func (db *VcsDb) FetchChangeStats() {
