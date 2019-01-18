@@ -92,8 +92,8 @@ func OpenDb(dbPath string, repoPath string, vcs string) *VcsDb2 {
 		log.Fatalf("Could not create db '%s': %s\n", db.dbPath, err)
 	}
 
-	// Write out an initial header
-	db.hdr.repoPath = repoPath
+	// Write out an initial header. Save paths as full paths.
+	db.hdr.repoPath, _ = filepath.Abs(repoPath)
 	db.hdr.vcs = vcs
 	if err := db.hdr.Save(db); err != nil {
 		log.Fatalf("Could not write db hdr: %s\n", err)
@@ -168,8 +168,9 @@ type VcsBaseInfo struct {
 	name string // filename data is persisted under
 }
 
+// (*VcsBaseInfo).Load reads core vars from database. These are used
+// to determine if the database is up-to-date compared to the repo.
 func (h *VcsBaseInfo) Load(db *VcsDb2) error {
-	// Load numRepoObjects
 	return db.doLoadData(h.name, func(line string) error {
 		if !getkvint(line, &h.numRepoObjects, "numRepoObjects=") &&
 			!getkvint(line, &h.numRepoCommits, "numRepoCommits=") &&
@@ -181,14 +182,15 @@ func (h *VcsBaseInfo) Load(db *VcsDb2) error {
 	})
 }
 
+// (*VcsBaseInfo).Save writes core vars to database.
 func (h *VcsBaseInfo) Save(db *VcsDb2) error {
-	var lines []string
-	lines = append(lines, fmt.Sprintf("numRepoObjects=%d\n", h.numRepoObjects))
-	lines = append(lines, fmt.Sprintf("numRepoCommits=%d\n", h.numRepoCommits))
-	lines = append(lines, fmt.Sprintf("refsSignature=%s\n", h.refsSignature))
-	lines = append(lines, fmt.Sprintf("graphUpToDate=%v\n", h.graphUpToDate))
 	h.dirty = false
-	return db.doSaveDataLines(h.name, lines)
+	return db.doSaveDataLines(h.name, []string{
+		fmt.Sprintf("numRepoObjects=%d\n", h.numRepoObjects),
+		fmt.Sprintf("numRepoCommits=%d\n", h.numRepoCommits),
+		fmt.Sprintf("refsSignature=%s\n", h.refsSignature),
+		fmt.Sprintf("graphUpToDate=%v\n", h.graphUpToDate),
+	})
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -206,6 +208,8 @@ func NewVcsRefs() *VcsRefs {
 	return &VcsRefs{name: "refs"}
 }
 
+// *VcsRefs).Load reads in the refs from the database.
+// TBD update vars in db.info
 func (h *VcsRefs) Load(db *VcsDb2) error {
 	h.refs = nil
 	h.dirty = false
@@ -218,14 +222,10 @@ func (h *VcsRefs) Load(db *VcsDb2) error {
 	})
 }
 
+// *VcsRefs).Save writes all refs to the database.
 func (h *VcsRefs) Save(db *VcsDb2) error {
 	h.dirty = false
-	i := -1
-	return db.doSaveData(h.name, func() string {
-		i++
-		if i == len(h.refs) {
-			return ""
-		}
+	return db.doSaveDataN(h.name, len(h.refs), func(i int) string {
 		return fmt.Sprintf("%s %s\n", string(h.refs[i].RefHash), h.refs[i].Refname)
 	})
 }
@@ -240,84 +240,133 @@ type VcsCommits struct {
 	hashes []vcs.Hash
 	commits []Commit
 
+	hashFile string // name used to store hashes
+	commitFiles []string // zero or more files used to store commits
+
 	dirty bool // true if data needs to be written to disk
 	name string // filename data is persisted under
+	err error // error from the load or save chain
 }
 
 func NewVcsCommits() *VcsCommits {
-	return &VcsCommits{name: "commits"}
+	return &VcsCommits{name: "commits", hashFile: "commits.hashes"}
 }
 
 func (h *VcsCommits) Load(db *VcsDb2) error {
-	h.hashes = nil
-	h.commits = nil
 	h.dirty = false
-
-	var modeStr string
-	mode := -1
-	i := 0
-	return db.doLoadData(h.name, func(line string) error {
-		if getkvstr(line, &modeStr, "===== hashes: ") {
-			mode = 0
-		} else if getkvstr(line, &modeStr, "===== commits: ") {
-			mode = 1
-		} else if mode == 0 {
-			h.hashes = append(h.hashes, vcs.Hash(line))
-		} else if mode == 1 {
-			var id int
-			var multival string
-			if getkvint(line, &id, "-- ") {
-				i := len(h.commits)
-				if i != id {
-					return fmt.Errorf("bad commit id %d (expected %d)", id, i)
-				}
-				h.commits = append(h.commits, Commit{})
-			} else if !getkvstr(line, &multival, "parents=") {
-				if multival != "" {
-					h.commits[i].parents = strings.Split(multival, " ")
-				}
-			} else if !getkvstr(line, &multival, "children=") {
-				if multival != "" {
-					h.commits[i].children = strings.Split(multival, " ")
-				}
-			} else if !getkvstr(line, &h.commits[i].hash, "hash=") &&
-				!getkvint(line, &h.commits[i].timestamp, "timestamp=") &&
-				!getkvstr(line, &h.commits[i].date, "date=") &&
-				!getkvstr(line, &h.commits[i].authorName, "authorName=") &&
-				!getkvstr(line, &h.commits[i].authorEmail, "authorEmail=") {
-				return fmt.Errorf("bad commit %d", i)
-			}
-		}
-		return nil
-	})
+	h.err = nil
+	return h.LoadBase(db).LoadHashes(db).LoadCommits(db).err
 }
 
 func (h *VcsCommits) Save(db *VcsDb2) error {
 	h.dirty = false
-	i := 0
-	mode := 0
-	return db.doSaveData(h.name, func() string {
-		i++
-		if mode == 0 {
-			mode = 1
-			i = -1
-			return fmt.Sprintf("===== hashes: %s\n", len(h.hashes))
-		}
-		if mode == 1 && i < len(h.hashes) {
+	h.err = nil
+	return h.SaveCommits(db).SaveHashes(db).SaveBase(db).err
+}
+
+// (*VcsCommits).LoadBase reads in the commits abstract from the database.
+func (h *VcsCommits) LoadBase(db *VcsDb2) *VcsCommits {
+	// Load commits metadata
+	if h.err == nil {
+		h.err = db.doLoadData(h.name, func(line string) error {
+			if !getkvstr(line, &h.hashFile, "hashFile=") &&
+			   !getkvstrlist(line, &h.commitFiles, "commitFiles=") {
+				return fmt.Errorf("invalid VcsCommits")
+			}
+			return nil
+		})
+	}
+	return h
+}
+
+// (*VcsCommits).SaveBase writes the commits abstract to the database.
+func (h *VcsCommits) SaveBase(db *VcsDb2) *VcsCommits {
+	// Save commits metadata
+	if h.err == nil {
+		h.err = db.doSaveDataLines(h.name, []string{
+			fmt.Sprintf("hashFile=%s\n", h.hashFile),
+			fmt.Sprintf("commitFiles=%s\n", strings.Join(h.commitFiles, ", ")),
+		})
+	}
+	return h
+}
+
+// (*VcsCommits).LoadHashes reads the commit hashes from the database.
+// This is an ordered list, meant to be compared with commit hashes fetched
+// from the repo.
+func (h *VcsCommits) LoadHashes(db *VcsDb2) *VcsCommits {
+	h.hashes = nil
+	if h.err == nil {
+		h.err = db.doLoadData(h.hashFile, func(line string) error {
+			h.hashes = append(h.hashes, vcs.Hash(line))
+			return nil
+		})
+	}
+	return h
+}
+
+// (*VcsCommits).SaveHashes writes the commit hashes to the database.
+func (h *VcsCommits) SaveHashes(db *VcsDb2) *VcsCommits {
+	if h.err == nil {
+		h.err = db.doSaveDataN(h.hashFile, len(h.hashes), func(i int) string {
 			return fmt.Sprintf("%s\n", string(h.hashes[i]))
-		} else if mode == 1 && i == len(h.hashes) {
-			mode = 2
-			i = -1
-			return fmt.Sprintf("===== commits: %s\n", len(h.commits))
-		} else if mode == 2 && i < len(h.commits) {
-			return fmt.Sprintf("-- %d\nhash=%s\ntimestamp=%d\nauthorName=%s\nauthorEmail=%s\nparents=%s\nchildren=%s\n",
-				i, string(h.commits[i].hash), h.commits[i].timestamp,
-				h.commits[i].authorName, h.commits[i].authorEmail,
-				strings.Join(h.commits[i].parents, " "), strings.Join(h.commits[i].children, " "))
-		} else {
-			return ""
+		})
+	}
+	return h
+}
+
+// (*VcsCommits).LoadCommits reads the commit data from the database.
+// This is not ordered, but it is treated as an append-only list.
+func (h *VcsCommits) LoadCommits(db *VcsDb2) *VcsCommits {
+	h.commits = nil
+	for _, file := range h.commitFiles {
+		if h.err != nil {
+			break
 		}
-	})
+		var i int
+		h.err = db.doLoadData(file, func(line string) error {
+			var index int
+			if getkvint(line, &index, "-- ") {
+				i = len(h.commits)
+				h.commits = append(h.commits, Commit{})
+				if i != index {
+					return fmt.Errorf("invalid VcsCommits.commits: saw %d but wanted %d", index, i)
+				}
+			}
+			if !getkvstr(line, &h.commits[i].hash, "hash=") &&
+				!getkvint(line, &h.commits[i].timestamp, "timestamp=") &&
+				!getkvstr(line, &h.commits[i].authorName, "authorName=") &&
+				!getkvstr(line, &h.commits[i].authorEmail, "authorEmail=") &&
+				!getkvstrlist(line, &h.commits[i].parents, "parents=") &&
+				!getkvstrlist(line, &h.commits[i].children, "children=") {
+					return fmt.Errorf("invalid VcsCommits.commits: %d", i)
+				}
+			return nil
+		})
+	}
+	return h
+}
+
+// (*VcsCommits).SaveCommits writes the commit data tp the database.
+func (h *VcsCommits) SaveCommits(db *VcsDb2) *VcsCommits {
+	if h.err == nil {
+		// for now, put it all in one file
+		h.commitFiles = []string{h.name+".commits"}
+		var sb strings.Builder
+		h.err = db.doSaveDataN(h.commitFiles[0], len(h.commits), func(i int) string {
+			sb.WriteString(fmt.Sprintf("-- %d\n", i))
+			sb.WriteString(fmt.Sprintf("hash=%s\n", string(h.commits[i].hash)))
+			sb.WriteString(fmt.Sprintf("timestamp=%d\n", h.commits[i].timestamp))
+			sb.WriteString(fmt.Sprintf("authorName=%s\n", h.commits[i].authorName))
+			sb.WriteString(fmt.Sprintf("authorEmail=%s\n", h.commits[i].authorEmail))
+			sb.WriteString(fmt.Sprintf("parents=%s\n", strings.Join(h.commits[i].parents, " ")))
+			sb.WriteString(fmt.Sprintf("children=%s\n", strings.Join(h.commits[i].children, " ")))
+			joined := sb.String()
+			sb.Reset()
+			return joined
+		})
+	}
+	return h
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -348,6 +397,23 @@ func (db *VcsDb2) doLoadData(name string, callback func(line string) error) erro
 	return fs.Err()
 }
 
+func (db *VcsDb2) doLoadDataLines(name string) ([]string, error) {
+	path := filepath.Join(db.dbPath, name)
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var lines []string
+	fs := bufio.NewScanner(f)
+	for fs.Scan() {
+		lines = append(lines, fs.Text())
+	}
+	return lines, fs.Err()
+}
+
 func (db *VcsDb2) doSaveData(name string, callback func() string) error {
 	path := filepath.Join(db.dbPath, name)
 
@@ -371,24 +437,7 @@ func (db *VcsDb2) doSaveData(name string, callback func() string) error {
 	return nil
 }
 
-func (db *VcsDb2) doLoadDataLines(name string) ([]string, error) {
-	path := filepath.Join(db.dbPath, name)
-
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	var lines []string
-	fs := bufio.NewScanner(f)
-	for fs.Scan() {
-		lines = append(lines, fs.Text())
-	}
-	return lines, fs.Err()
-}
-
-func (db *VcsDb2) doSaveDataLines(name string, lines []string) error {
+func (db *VcsDb2) doSaveDataN(name string, N int, callback func(int) string) error {
 	path := filepath.Join(db.dbPath, name)
 
 	f, err := os.Create(path)
@@ -399,14 +448,51 @@ func (db *VcsDb2) doSaveDataLines(name string, lines []string) error {
 	w := bufio.NewWriter(f)
 	defer w.Flush()
 
-	for _, line := range lines {
-		_, err = w.WriteString(line)
-		if err != nil {
-			return err
-		}
+	for i := 0; i < N; i++ {
+		_, err = w.WriteString(callback(i))
 	}
 
 	return nil
+}
+
+func (db *VcsDb2) doSaveDataLines(name string, lines []string) error {
+	return db.doSaveDataWorker(name, func(w *bufio.Writer) error {
+		for _, line := range lines {
+			if _, err := w.WriteString(line); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (db *VcsDb2) doSaveDataWorker(name string, worker func(w *bufio.Writer) error) error {
+	path := filepath.Join(db.dbPath, name)
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+
+	return worker(w)
+}
+
+// Get the stringlist value of a key=value pair
+func getkvstrlist(text string, val *[]string, prefix string) bool {
+	n := len(prefix)
+	if len(text) < n || text[0:n] != prefix {
+		return false
+	}
+	strlist := text[n:]
+	if strlist != "" {
+		*val = strings.Split(strlist, ", ")
+	} else {
+		*val = nil
+	}
+	return true
 }
 
 // Get the string value of a key=value pair

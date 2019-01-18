@@ -1,5 +1,7 @@
 // vcsloc/loc/loadsave.go
 
+// THIS IS DEAD CODE AND WILL BE REMOVED SOON
+
 package loc
 
 import (
@@ -16,8 +18,6 @@ import (
 	"vcsloc/gsos"
 	"vcsloc/vcs"
 )
-
-// This code is obsolete and will be removed soon.
 
 const SAVE_RAW_GRAPH = false
 

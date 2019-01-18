@@ -3,7 +3,7 @@
 package loc
 
 import (
-//	"fmt"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -72,7 +72,7 @@ func (work *Analyzer) UpdateRepo() {
 	// If we have the same objects and the same refs, we have all
 	// the data (this is probably too strong, either is likely sufficient)
 	if work.db.info.graphUpToDate && work.db.info.numRepoObjects == numObjects && sameRefs {
-		work.terminal.Printf("Database up to date")
+		work.terminal.Printf("Database up to date\n")
 		return
 	}
 
@@ -111,7 +111,7 @@ func (work *Analyzer) UpdateRepo() {
 }
 
 // FetchAllCommitHashes fetches just the commit hashes. This should run at
-// about 50K hashes/second
+// about 100K hashes/second.
 func (work *Analyzer) FetchAllCommitHashes() []vcs.Hash {
 	var hashes []vcs.Hash
 	outCb := func(line string) {
@@ -123,30 +123,103 @@ func (work *Analyzer) FetchAllCommitHashes() []vcs.Hash {
 
 	cmd := []string{"log", "--all", "--pretty=%H"}
 	vcs.RunGitCommandIncremental(outCb, nil, work.db.hdr.repoPath, nil, cmd...)
-	work.terminal.Printf("Got %d commit hashes", len(hashes))
+	work.terminal.Printf("Got %d commit hashes\n", len(hashes))
 
 	return hashes
 }
 
 // FetchMissingCommits fetches commits that we haven't received yet. This should
-// run at about 2000 commits/second
+// run at about 2000 commits/second without -m, and about 500 commits/sec with -m.
 func (work *Analyzer) FetchMissingCommits() {
 	var commits []Commit
+	var i int
 	outCb := func(line string) {
 		if strings.HasPrefix(line, "|Commit|") {
+			i = len(commits)
 			commits = append(commits, Commit{})
 		}
-		//fmt.Printf("%s\n", line)
+		work.ParseCommitLine(line, &commits[i])
+		if work.verbose {
+			fmt.Printf("%s\n", line)
+		}
 		if work.terminal.Ready() {
 			work.terminal.Progressf("Getting commits (%d)...", len(commits))
 		}
 	}
 
 	prettyFormat := "--pretty=format:|Commit| %H |Timestamp| %at |AuthorName| %aN |AuthorEmail| %aE |Parents| %P"
-	cmd := []string{"log", "--numstat", "--summary", prettyFormat, "--all"}
+	cmd := []string{"log", "-c", "--numstat", "--summary", prettyFormat, "--all"}
 	vcs.RunGitCommandIncremental(outCb, nil, work.db.hdr.repoPath, nil, cmd...)
-	work.terminal.Printf("Got %d commits", len(commits))
+
+	work.db.commits.commits = commits
+	work.db.commits.dirty = true
+
+	work.terminal.Printf("Got %d commits\n", len(commits))
 }
+
+// ParseCommitLine reads the commit log (our specific format) and writes
+// commit data
+func (work *Analyzer) ParseCommitLine(line string, c *Commit) {
+	// If this is the first line of a commit, parse out the commit header info
+	if cPos := strings.Index(line, "|Commit| "); cPos != -1 {
+		cPos := strings.Index(line, "|Commit| ")
+		tPos := strings.Index(line, "|Timestamp| ")
+		anPos := strings.Index(line, "|AuthorName| ")
+		aePos := strings.Index(line, "|AuthorEmail| ")
+		pPos := strings.Index(line, "|Parents| ")
+		if cPos == -1  || tPos == -1 || anPos == -1 || aePos == -1 || pPos == -1 {
+			work.terminal.Fatalf("Bad log: %s\n", line)
+		}
+
+		commitHash := line[cPos+9:tPos-1]
+		timestampS := line[tPos+12:anPos-1]
+		authorName := line[anPos+13:aePos-1]
+		authorEmail := line[aePos+14:pPos-1]
+		parentS := strings.TrimSpace(line[pPos+10:])
+		var parentHashes []string
+		if parentS == "" {
+			parentHashes = nil
+		} else {
+			parentHashes = strings.Split(line[pPos+10:], " ")
+		}
+
+		timestamp, err := strconv.Atoi(timestampS)
+		if err != nil {
+			work.terminal.Fatalf("Bad log (timestamp): %s\n", line)
+		}
+
+		c.hash = commitHash
+		c.timestamp = timestamp
+		c.authorName = authorName
+		c.authorEmail = authorEmail
+		c.parents = parentHashes
+		c.children = nil // filled in by graph traversal
+
+		return
+	}
+
+	// ignore blank line
+	if line == "" {
+		return
+	}
+
+	// Parse --numstat data
+	// If it's a numstat line, it's <add>\t<del>\t<file>
+	// (we count on the fact that no random line will have precisely two tabs)
+	tokens := strings.Split(line, "\t")
+	if len(tokens) == 3 {
+		// do work
+		return
+	}
+
+	// Otherwise, it must be a summary line, which refers back to
+	// one of the files we have from numstat
+}
+
+
+
+
+// THIS IS DEAD CODE AND WILL BE REMOVED SOON
 
 // ----------------------------------------------------------------------------------------------
 

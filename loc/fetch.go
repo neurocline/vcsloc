@@ -1,5 +1,7 @@
 // vcsloc/loc/fetch.go
 
+// THIS IS DEAD CODE AND WILL BE REMOVED SOON
+
 package loc
 
 import (

@@ -72,10 +72,6 @@ func RunExternalIncremental(outCb, errCb func(string),
 	startTime := gsos.HighresTime()
 	c.Start()
 
-	for stdout.Scan() {
-		outCb(stdout.Text())
-	}
-
 	go func() {
 		for stderr.Scan() {
 			line := stderr.Text()
@@ -85,6 +81,10 @@ func RunExternalIncremental(outCb, errCb func(string),
 		}
 		done <- struct{}{} // prevent race, although this could slow us down on really quick externals
 	}()
+
+	for stdout.Scan() {
+		outCb(stdout.Text())
+	}
 
 	// Now wait for all the output. Hopefully our stderr will be consumed before
 	// we exit.

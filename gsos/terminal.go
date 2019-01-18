@@ -51,6 +51,7 @@ type ThrottleTerminal struct {
 	lastStatus time.Time
 	period time.Duration
 
+	startTime time.Time
 	lineMax int
 }
 
@@ -60,6 +61,7 @@ func NewThrottleTerminal(period time.Duration) *ThrottleTerminal {
 	t := &ThrottleTerminal{
 		lastStatus: time.Now(),
 		period: period,
+		startTime: time.Now(),
 	}
 	t.Len()
 	return t
@@ -75,6 +77,7 @@ func (t *ThrottleTerminal) Progressf(format string, a ...interface{}) (n int, er
 	// Create a line of exactly the terminal length - this is so that progress messages
 	// don't leave garbage at their right-hand edge.
 	out := fmt.Sprintf(format, a...)
+	out = fmt.Sprintf("T+%.2f: %s", time.Since(t.startTime).Seconds(), out)
 	out = StringFillToExact(out, t.lineMax)
 
 	// Reset Ready() timer and do unterminated line output (we rely on the user
